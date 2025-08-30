@@ -8,6 +8,7 @@ import { z } from 'zod';
 // Import schemas
 import { 
   createUserInputSchema,
+  updateUserInputSchema,
   startPhoneVerificationInputSchema,
   verifyPhoneCodeInputSchema
 } from './schema';
@@ -45,6 +46,10 @@ const appRouter = router({
   getUserByEmail: publicProcedure
     .input(z.object({ email: z.string().email() }))
     .query(({ input }) => getUserByEmail(input.email)),
+
+  updateUser: publicProcedure
+    .input(updateUserInputSchema)
+    .mutation(({ input }) => updateUser(input)),
 
   // Phone verification routes
   startPhoneVerification: publicProcedure

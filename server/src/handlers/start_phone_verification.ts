@@ -2,10 +2,41 @@ import { db } from '../db';
 import { usersTable, phoneVerificationsTable } from '../db/schema';
 import { type StartPhoneVerificationInput, type PhoneVerificationResponse } from '../schema';
 import { eq, and, desc } from 'drizzle-orm';
+import twilio from 'twilio';
+
+// Twilio configuration
+const accountSid = process.env['TWILIO_ACCOUNT_SID'];
+const authToken = process.env['TWILIO_AUTH_TOKEN'];
+const verifyServiceSid = process.env['TWILIO_VERIFY_SERVICE_SID'];
+
+let twilioClient: any = null;
+const isTwilioConfigured = accountSid && authToken && verifyServiceSid;
+
+if (isTwilioConfigured) {
+  twilioClient = twilio(accountSid, authToken);
+} else {
+  console.error('Missing Twilio environment variables: TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_VERIFY_SERVICE_SID');
+  console.log('Falling back to mock verification for development/testing');
+}
+
+// Utility function to format phone numbers to E.164 format for Twilio
+const formatPhoneNumberE164 = (phoneNumber: string): string => {
+  const digits = phoneNumber.replace(/\D/g, '');
+  if (phoneNumber.startsWith('+')) {
+    return phoneNumber; // Already in E.164
+  } else if (digits.length === 10) {
+    return `+1${digits}`; // Assume US number if 10 digits and no '+'
+  }
+  // For other cases, prepend '+' assuming it's a valid international number without '+'
+  return `+${digits}`; 
+};
 
 export const startPhoneVerification = async (input: StartPhoneVerificationInput): Promise<PhoneVerificationResponse> => {
   try {
-    // 1. Check if user exists
+    // 1. Validate and format phone number early
+    const formattedPhoneNumber = formatPhoneNumberE164(input.phone_number);
+
+    // 2. Check if user exists
     const users = await db.select()
       .from(usersTable)
       .where(eq(usersTable.id, input.user_id))
@@ -20,22 +51,22 @@ export const startPhoneVerification = async (input: StartPhoneVerificationInput)
 
     const user = users[0];
 
-    // 2. Check if user's phone is already verified
-    if (user.phone_verified && user.phone_number === input.phone_number) {
+    // 3. Check if user's phone is already verified with this number
+    if (user.phone_verified && user.phone_number === formattedPhoneNumber) {
       return {
         success: false,
         message: "Phone number is already verified"
       };
     }
 
-    // 3. Check for existing active verification for this user
+    // 4. Check for existing active verification for this user (spam prevention)
     const now = new Date();
     const activeVerifications = await db.select()
       .from(phoneVerificationsTable)
       .where(
         and(
           eq(phoneVerificationsTable.user_id, input.user_id),
-          eq(phoneVerificationsTable.phone_number, input.phone_number)
+          eq(phoneVerificationsTable.phone_number, formattedPhoneNumber)
         )
       )
       .orderBy(desc(phoneVerificationsTable.created_at))
@@ -56,19 +87,60 @@ export const startPhoneVerification = async (input: StartPhoneVerificationInput)
       }
     }
 
-    // 4. Generate a 6-digit verification code
-    const verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
+    let verificationCode: string;
+    let twilioSid: string | null = null;
 
-    // 5. Set expiration time (10 minutes from now)
-    const expiresAt = new Date(now.getTime() + 10 * 60 * 1000);
+    if (isTwilioConfigured) {
+      // Use Twilio Verify Service to send the code
+      try {
+        const twilioVerification = await twilioClient.verify.v2.services(verifyServiceSid)
+          .verifications
+          .create({ to: formattedPhoneNumber, channel: 'sms' });
+
+        if (twilioVerification.status === 'pending') {
+          verificationCode = 'TWILIO_MANAGED'; // Code is managed by Twilio
+          twilioSid = twilioVerification.sid;
+        } else {
+          return {
+            success: false,
+            message: 'Failed to initiate Twilio verification. Status: ' + twilioVerification.status
+          };
+        }
+      } catch (twilioError: any) {
+        console.error('Twilio SMS sending failed:', twilioError);
+        // Handle common Twilio errors like rate limits or invalid numbers
+        if (twilioError.status === 400) {
+          return {
+            success: false,
+            message: twilioError.message || 'Invalid phone number or other Twilio error.'
+          };
+        } else if (twilioError.status === 429) {
+          return {
+            success: false,
+            message: 'Too many verification attempts. Please wait a few minutes before trying again.'
+          };
+        }
+        return {
+          success: false,
+          message: 'Failed to send verification code. Please try again later.'
+        };
+      }
+    } else {
+      // Fallback to mock verification for development/testing
+      verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
+      console.log(`Mock SMS sent to ${formattedPhoneNumber} with code: ${verificationCode}`);
+    }
+
+    // 5. Set expiration time for the code (10 minutes from now)
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
     // 6. Store verification record in database
     const verificationResult = await db.insert(phoneVerificationsTable)
       .values({
         user_id: input.user_id,
-        phone_number: input.phone_number,
+        phone_number: formattedPhoneNumber,
         verification_code: verificationCode,
-        twilio_sid: null, // In a real implementation, this would be set after Twilio API call
+        twilio_sid: twilioSid,
         verified: false,
         expires_at: expiresAt
       })
@@ -77,10 +149,6 @@ export const startPhoneVerification = async (input: StartPhoneVerificationInput)
 
     const verification = verificationResult[0];
 
-    // 7. In a real implementation, send SMS via Twilio API here
-    // For now, we'll simulate successful SMS sending
-    console.log(`Simulated SMS sent to ${input.phone_number} with code: ${verificationCode}`);
-
     return {
       success: true,
       message: "Verification code sent successfully",
@@ -88,6 +156,9 @@ export const startPhoneVerification = async (input: StartPhoneVerificationInput)
     };
   } catch (error) {
     console.error('Phone verification start failed:', error);
-    throw error;
+    return {
+      success: false,
+      message: error instanceof Error ? error.message : 'An unknown error occurred during verification start.'
+    };
   }
 };

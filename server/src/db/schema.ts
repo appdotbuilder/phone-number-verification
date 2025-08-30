@@ -6,7 +6,7 @@ export const usersTable = pgTable('users', {
   id: serial('id').primaryKey(),
   email: text('email').notNull().unique(),
   first_name: text('first_name').notNull(),
-  phone_number: text('phone_number'), // Nullable by default
+  phone_number: text('phone_number'), // Nullable by default, will store E.164
   phone_verified: boolean('phone_verified').notNull().default(false),
   created_at: timestamp('created_at').defaultNow().notNull(),
   updated_at: timestamp('updated_at').defaultNow().notNull()
@@ -16,9 +16,9 @@ export const usersTable = pgTable('users', {
 export const phoneVerificationsTable = pgTable('phone_verifications', {
   id: serial('id').primaryKey(),
   user_id: integer('user_id').notNull().references(() => usersTable.id),
-  phone_number: text('phone_number').notNull(),
-  verification_code: text('verification_code').notNull(),
-  twilio_sid: text('twilio_sid'), // Twilio verification service SID, nullable
+  phone_number: text('phone_number').notNull(), // The E.164 formatted number
+  verification_code: text('verification_code').notNull(), // Will store 'TWILIO_MANAGED' or actual code if not using Verify Service
+  twilio_sid: text('twilio_sid'), // Twilio verification SID, nullable (will be filled)
   verified: boolean('verified').notNull().default(false),
   expires_at: timestamp('expires_at').notNull(),
   created_at: timestamp('created_at').defaultNow().notNull()
